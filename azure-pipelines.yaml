@@ -1,0 +1,155 @@
+trigger: none
+# - main
+# - feature/*
+
+# Instead of hardcoding values like dev, prod, qa, and staging, use the parameter ${{ parameters.environments }}. 
+# parameters: 
+# - name: enviroments 
+# displayName: ENVIRONMENT 
+# type: string 
+# default: dev 
+# values: 
+# - dev 
+# - prod
+
+variables:
+- group: infracost-secrets
+- group: backend_and_service_connection_secret
+- name: Work_Dir
+  value: $(System.DefaultWorkingDirectory)/environments/dev
+
+pool: AzureAnchors
+
+stages:
+- stage: InfrastructureSecurityScanning
+  displayName: Infrastructure Security & Compliance Scanning
+  jobs:
+    - job: TfsecSecurityScan
+      displayName: Tfsec Infrastructure Security Scan
+      steps:        
+      - task: PowerShell@2
+        displayName: Run Tfsec Scan
+        inputs:
+          targetType: inline
+          script: |
+            tfsec $(System.DefaultWorkingDirectory)
+            tfsec $(System.DefaultWorkingDirectory) --format json --out tfsec-report.json
+
+    - job: TflintCodeQualityScan
+      displayName: Terraform Linting Scan
+      steps:
+      - task: PowerShell@2
+        displayName: Run TFLint Scan
+        continueOnError: true
+        inputs:
+          targetType: 'inline'
+          script: |
+            cd "$(System.DefaultWorkingDirectory)"
+                  tflint --init
+                  tflint --recursive > tflint-report.json
+
+      - task: PublishBuildArtifacts@1
+        displayName: Publish TFLint JSON Report
+        inputs:
+          PathtoPublish: '$(System.DefaultWorkingDirectory)/tflint-report.json'
+          ArtifactName: 'tflint-json-report'
+          publishLocation: 'Container'
+
+
+    - job: CheckovPolicyComplianceScan
+      displayName: Checkov Policy Compliance Scan
+      steps:
+      - task: PowerShell@2
+        displayName: Run Checkov Scan
+        continueOnError: true
+        inputs:
+          targetType: 'inline'
+          script: 'checkov -d $(System.DefaultWorkingDirectory) --framework terraform'
+
+- stage: TerraformInitFormatPlan
+  dependsOn: InfrastructureSecurityScanning
+  displayName: Terraform Initialization, Validation & Planning
+  jobs:
+    - job: TerraformInitValidatePlan
+      displayName: Terraform Init, Validate and Plan
+      steps:
+      - template: templates/terraform-init.yaml
+
+      - task: TerraformTask@5
+        displayName: Terraform Validate Configuration
+        inputs:
+          provider: 'azurerm'
+          command: 'validate'
+          workingDirectory: '$(Work_Dir)'
+
+      - task: TerraformTask@5
+        displayName: Terraform Plan Execution
+        inputs:
+          provider: 'azurerm'
+          command: 'plan'
+          workingDirectory: '$(Work_Dir)'
+          environmentServiceNameAzureRM: '$(Service_Connection)'
+
+- stage: TrivyVulnerabilityScan
+  dependsOn: TerraformInitFormatPlan
+  displayName: Trivy Security & Vulnerability Scan
+  jobs:
+    - job: TrivyFilesystemScan
+      displayName: Trivy Filesystem Scan
+      steps:
+      - task: PowerShell@2
+        displayName: Run Trivy Vulnerability Scan
+        continueOnError: true
+        inputs:
+          targetType: 'inline'
+          script: |
+            trivy fs $(System.DefaultWorkingDirectory) --scanners vuln,misconfig,secret --severity HIGH,CRITICAL --exit-code 1
+
+- stage: InfrastructureCostEstimation
+  dependsOn: TerraformInitFormatPlan
+  displayName: Infrastructure Cost Estimation
+  jobs:
+    - job: InfracostAnalysis
+      displayName: Infracost Cost Analysis
+      steps:
+      - task: PowerShell@2
+        displayName: Run Infracost Estimation
+        inputs:
+          targetType: 'inline'
+          script: |
+            infracost configure set api_key $(INFRACOST_API_KEY)
+            infracost breakdown --path=$(Work_Dir)
+          workingDirectory: '$(Work_Dir)'
+
+- stage: ManualApprovalGate
+  dependsOn: InfrastructureCostEstimation
+  displayName: Manual Approval Gate
+  pool: server
+  jobs:
+    - job: ManualApproval
+      displayName: Manual Infrastructure Approval
+      steps:
+      - task: ManualValidation@1
+        displayName: Await Manual Validation
+        inputs:
+          notifyUsers: 'ershadalams150@gmail.com'
+          approvers: 'ershadalams150@gmail.com'
+          instructions: 'If plan is reviewed and approved, proceed with Terraform apply.'
+
+- stage: TerraformApply
+  dependsOn: ManualApprovalGate
+  displayName: Terraform Apply Execution
+  jobs:
+    - job: TerraformInitAndApply
+      displayName: Terraform Initialization and Apply
+      steps:
+      - template: templates/terraform-init.yaml
+
+      - task: TerraformTask@5
+        displayName: Terraform Apply Changes
+        inputs:
+          provider: 'azurerm'
+          command: 'apply'
+          workingDirectory: '$(Work_Dir)'
+          commandOptions: '-auto-approve'
+          environmentServiceNameAzureRM: '$(Service_Connection)'

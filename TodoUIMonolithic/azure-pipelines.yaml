@@ -1,0 +1,159 @@
+trigger: none
+
+pool: AzureAnchors
+
+variables:
+  - group: Sonar_token
+
+stages:
+
+- stage: StaticCodeAnalysis
+  displayName: Static Code Analysis (SonarQube)
+  jobs:
+  - job: SonarQubeStaticAnalysis
+    displayName: SonarQube Static Analysis Job
+    steps:
+    - task: PowerShell@2
+      displayName: SonarQube Source Code Scan
+      continueOnError: true
+      inputs:
+        targetType: inline
+        script: |
+          sonar-scanner `
+            -D"sonar.host.url=http://localhost:9000" `
+            -D"sonar.token=$(SONAR_TOKEN)" `
+            -D"sonar.projectKey=todo-app"
+
+
+- stage: CodeLinting
+  displayName: Code Linting and Style Validation
+  jobs:
+  - job: MultiFileLinting
+    displayName: Linting for JS, CSS, YAML, MD
+    steps:
+
+    - task: PowerShell@2
+      displayName: JavaScript Linting (Biome)
+      continueOnError: true
+      inputs:
+        targetType: inline
+        script: |
+          biome lint $(System.DefaultWorkingDirectory)/src/
+
+    - task: PowerShell@2
+      displayName: CSS Linting (Stylelint)
+      continueOnError: true
+      inputs:
+        targetType: inline
+        script: |
+          npm install -g stylelint
+          npm install -g stylelint-config-standard
+          stylelint $(System.DefaultWorkingDirectory)/src/ --config stylelint.config.mjs
+
+    - task: PowerShell@2
+      displayName: YAML Linting (Yamllint)
+      continueOnError: true
+      inputs:
+        targetType: inline
+        script: |
+          python -m pip install --user yamllint
+          python -m yamllint $(System.DefaultWorkingDirectory)
+
+    - task: PowerShell@2
+      displayName: Markdown Linting (Markdownlint)
+      continueOnError: true
+      inputs:
+        targetType: inline
+        script: |
+          npm install -g markdownlint-cli
+          markdownlint $(System.DefaultWorkingDirectory)
+
+
+- stage: SoftwareCompositionAnalysis
+  displayName: Dependency Vulnerability Scanning
+  jobs:
+  - job: RetireJSScan
+    displayName: RetireJS Dependency Scan
+    steps:
+    - task: PowerShell@2
+      displayName: RetireJS Code Scanning
+      continueOnError: true
+      inputs:
+        targetType: inline
+        script: |
+          npm install -g retire
+          npm install
+          retire $(System.DefaultWorkingDirectory) --outputformat json --outputpath retire-output.json
+
+    - task: PublishBuildArtifacts@1
+      displayName: Publish RetireJS Scan Artifact
+      inputs:
+        PathtoPublish: $(System.DefaultWorkingDirectory)/retire-output.json
+        ArtifactName: retirejs-output
+        publishLocation: Container
+
+
+- stage: ApplicationBuild
+  displayName: Frontend Application Build(Todo App)
+  jobs:
+  - job: TodoFrontendBuild
+    displayName: Build Todo Frontend Application
+    steps:
+
+    - task: NodeTool@0
+      displayName: Install Node.js Runtime
+      inputs:
+        versionSource: spec
+        versionSpec: 16.x
+
+    - task: PowerShell@2
+      displayName: Install NPM Dependencies
+      inputs:
+        targetType: inline
+        script: |
+          npm install
+
+    - task: PowerShell@2
+      displayName: Build Frontend Application
+      inputs:
+        targetType: inline
+        script: |
+          npm run build
+
+    - task: PublishPipelineArtifact@1
+      displayName: Publish Frontend Build Artifact
+      inputs:
+        targetPath: $(System.DefaultWorkingDirectory)/build
+        artifact: todo-frontend-application-build
+        publishLocation: pipeline
+
+- stage: ApplicationDeployment
+  displayName: Application Deployment to Virtual Machine
+  jobs:
+  - job: DeployFrontendToVM
+    displayName: Deploy Frontend Application to VM
+    steps:
+
+    - task: DownloadPipelineArtifact@2
+      displayName: Download Frontend Build Artifact
+      inputs:
+        buildType: 'current'
+        artifactName: 'todo-frontend-application-build'
+        targetPath: '$(System.DefaultWorkingDirectory)/build'
+
+    - task: CopyFilesOverSSH@0
+      displayName: Transfer Build Files to Target VM
+      inputs:
+        sshEndpoint: 'connection to vm'
+        sourceFolder: '$(System.DefaultWorkingDirectory)/build'
+        contents: '**'
+        targetFolder: '/home/devopsadmin'
+        readyTimeout: '20000'
+
+    - task: SSH@0
+      displayName: Deploy Application to Web Server Directory
+      inputs:
+        sshEndpoint: 'connection to vm'
+        runOptions: 'commands'
+        commands: 'sudo cp -r /home/devopsadmin/* /var/www/html'
+        readyTimeout: '20000'

@@ -1,0 +1,56 @@
+trigger: none
+pool: AzureAnchors
+
+stages:
+- stage: CodeQuality_Python_Lint
+  displayName: Code Quality | Python Linting
+  jobs:
+  - job: Python_Lint_Validation
+    displayName: Validate Python Code Standards
+    steps:
+    - task: PowerShell@2
+      displayName: Run Python Linter (Ruff)
+      continueOnError: true
+      inputs:
+        targetType: 'inline'
+        script: 'ruff check'
+
+- stage: Artifact_Publish
+  displayName: Artifact Management | Publish Build Artifacts
+  jobs:
+  - job: Artifact_Publish_Job
+    displayName: Publish Application Artifacts
+    steps:
+    - task: PublishPipelineArtifact@1
+      displayName: Publish Pipeline Artifact
+      inputs:
+        targetPath: '$(System.DefaultWorkingDirectory)/app.py'
+        artifact: 'todoapi_artifacts'
+        publishLocation: 'pipeline'
+    
+- stage: Deployment_VM_Dev
+  displayName: Deployment | Dev Virtual Machine
+  jobs:
+  - deployment: VM_Application_Deploy
+    displayName: Deploy Application to Dev VM
+    environment:
+      name: dev-todoapi
+      resourceType: virtualMachine
+    strategy:
+     runOnce:
+       deploy:
+         steps:
+         - task: DownloadPipelineArtifact@2
+           displayName: Download Application Artifact
+           inputs:
+             buildType: 'current'
+             artifactName: 'todoapi_artifacts'
+             targetPath: '$(Pipeline.Workspace)'
+         - task: Bash@3
+           displayName: Deploy Application & Start Service
+           inputs:
+             targetType: 'inline'
+             script: |
+               sudo cp $(Pipeline.Workspace)/app.py /home/azureuser/todoapi/
+               sudo systemctl daemon-reload
+               sudo systemctl start uvicorn
